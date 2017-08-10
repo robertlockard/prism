@@ -569,8 +569,9 @@ END;
 --  DDL for Package IRP_CHAMELEON
 --------------------------------------------------------
 
-  CREATE OR REPLACE EDITIONABLE PACKAGE "IRP"."IRP_CHAMELEON" 
+CREATE OR REPLACE EDITIONABLE PACKAGE "IRP"."IRP_CHAMELEON" 
 AS
+
 FUNCTION fInsChameleon(pIRPNbr 		IN NUMBER,
                         pusdotnbr 	IN VARCHAR2,
                         pvin        IN VARCHAR2 DEFAULT NULL,
@@ -623,6 +624,8 @@ FUNCTION fcheckvehicle(pvin        IN VARCHAR2,
 --
 FUNCTION fchameleonscorethreshold RETURN INTEGER;
 
+FUNCTION fCalcScore(pirpnbr IN INTEGER) RETURN NUMBER;
+
 END irp_chameleon;
 /
 
@@ -630,12 +633,149 @@ END irp_chameleon;
 --  DDL for Package Body IRP_CHAMELEON
 --------------------------------------------------------
 
-  CREATE OR REPLACE EDITIONABLE PACKAGE BODY "IRP"."IRP_CHAMELEON" 
+CREATE OR REPLACE EDITIONABLE PACKAGE BODY "IRP"."IRP_CHAMELEON" 
 AS
-  -- 20170228.1   initial version. the package is setup to test
-  --              for phone number, address and email. this package
-  --              depends on a few objects. execute on the package
-  --              irp.irp_api_lookups, and select on irp.irp_applicants
+
+	-- get the company name
+	FUNCTION fCompanyName(pirpnbr INTEGER) RETURN irp.irp_applicants.irp_app_company%type IS
+	sCompany irp.irp_app_company%type;
+	BEGIN
+		SELECT irp_app_company
+		INTO sCompany
+		FROM irp.irp_applicants
+		WHERE irp_app_irpnbr = pIrpNbr;
+		-- 
+		RETURN sCompany;
+	EXCEPTION WHEN NO_DATA_FOUND THEN
+		RAISE_APPLICATION_ERROR(-20006, 'irp number does not exists');
+		RETURN NULL;
+	END fCompanyName;
+	--
+	FUNCTION fGetUSDOTNbr(pIrpNbr INTEGER) RETURN irp.irp_applicants.irp_app_usdotno%type IS
+		sUSDOTNbr	irp.irp_applicants.irp_app_usdotno%type;
+	BEGIN
+		SELECT irp_app_usdotno
+		INTO sUSDOTNbr
+		FROM irp.irp_applicants
+		WHERE irp_app_irpnbr = pIrpNbr;
+		--
+		RETURN sUSDOTNbr;
+	EXCEPTION WHEN NO_DATA_FOUND THEN
+		RAISE_APPLICATION_ERROR(-20006, 'irp number does not exists');
+		RETURN -1;
+	END fGetUSDOTNbr;
+	--
+	PROCEDURE pGetContactName(pIrpNbr 	IN 		irp.irp_applicants.irp_app_irpnbr%type,
+							pFname			OUT irp.irp_contacts.irp_con_fname%type,
+							pMname			OUT irp.irp_contacts.irp_con_mname%type,
+							pLname			OUT irp.irp_contacts.irp_con_lname%type) IS
+	sName	irp.irp_applicants.irp_app_conlname%type;
+	sSuffix	irp.irp_contacts.irp_con_sufix%type;	-- we are not using suffex in this
+													-- context, just a place holder.
+	BEGIN
+		SELECT irp_app_conlname
+		INTO sName
+		FROM irp.irp_applicants
+		WHERE irp_app_irpnbr = pIRPNbr;
+		
+		-- take the name and parse it. future release, we are going to be going
+		-- against the irp.irp_contacts table.
+		irp.irp_chameleon.pParseName( pName => sName,
+									pFname  => pFname,
+									pMname  => pMname,
+									pLname  => pLname,
+									pSuffix => sSuffix);
+		
+	EXCEPTION when_no_data_found THEN
+		RAISE_APPLICATION_ERROR(-20006, 'irp number does not exists.');
+	END pGetContactName;
+	
+	PROCEDURE pGetAddressDetails(pIrpNbr	IN INTEGER,
+								pAddStreet	OUT irp.irp_applicants.irp_app_addstreet%type,
+								pAddLine2	OUT irp.irp_applicants.irp_app_addline2%type,
+								pAddCity	OUT irp.irp_applicants.irp_app_addcity%type,
+								pAddState	OUT irp.irp_applicants.irp_app_addstate%type,
+								pAddZip		OUT irp.irp_applicants.irp_app_addzip%type) IS
+
+	BEGIN
+		SELECT irp_app_app_addstreet,
+			   irp_app_addline2,
+			   irp_app_addcity,
+			   irp_app_addstate,
+			   irp_app_addzip
+		INTO pAddStreet,
+			 pAddLine2,
+			 pAddCity,
+			 pAddState,
+			 pAddZip
+		FROM irp.irp_applicants
+		WHERE irp_app_irpnbr = pIrpNbr;
+	EXCEPTION WHEN no_data_found THEN
+		RAISE_APPLICATION_ERROR(-20006, 'irp number does not exists');
+	END pGetAddressDetails;
+	--
+	FUNCTION fGetEmail(pIrpNbr INTEGER) RETURN irp.irp_applicants.irp_app_conemail%type IS
+	sEmail irp.irp_applicants.irp_app_conemail%type;
+	BEGIN
+		SELECT irp_app_conemail
+		INTO sEmail
+		FROM irp_applicants
+		WHERE irp_app_irpnbr = pIRPNbr;
+		--
+		RETURN sEmail;
+	EXCEPTION WHEN no_data_found THEN 
+		RAISE_APPLICATION_ERROR(-20006, 'irp number does not exists');
+	END fGetEmail;
+	--
+	FUNCTION fGetPhone(pIRPNbr IN INTEGER) RETURN irp.irp_applicants.irp_app_conphone%type IS
+	sPhone irp.irp_applicants.irp_app_conphone%type;
+	BEGIN
+		SELECT irp_app_conphone
+		INTO sPhone
+		FROM irp.irp_applicants
+		WHERE irp_app_irpnbr = pIRPNbr;
+		--
+		RETURN sPhone;
+	EXCEPTION WHEN no_data_found THEN
+		RAISE_APPLICATION_ERROR(-20006, 'irp number does not exists.');
+		RETURN NULL;
+	END fGetPhone; 
+	
+	--
+	PROCEDURE pGetCompanyDetails(pIRPNbr IN INTEGER
+				pCompany	OUT irp.irp_applicants.irp_app_company%type,
+				pUSDOTNbr	OUT irp.irp_applicants.irp_app_usdotno%type,
+				pFname		OUT irp.irp_contacts.irp_con_fname%type,
+				pMname		OUT irp.irp_contacts.irp_con_mname%type,
+				pLname		OUT irp.irp_contacts.irp_con_lname%type,
+				pAddStreet	OUT irp.irp_applicants.irp_app_addstreet%type,
+				pAddLine2	OUT irp.irp_applicants.irp_app_addline2%type,
+				pAddCity	OUT irp.irp_applicants.irp_app_addcity%type,
+				pAddState	OUT irp.irp_applicants.irp_app_addstate%type,
+				pAddZip		OUT irp.irp_applicants.irp_app_addzip%type,
+				pEmail		OUT irp.irp_applicants.irp_app_conemail%type,
+ 				pPhone		OUT irp.irp_applicants.irp_app_conphone%type) IS
+	BEGIN
+	sCompany 	:= irp.irp_chameleon.fCompanyName(pIrpNbr => pIrpNbr);
+	sUSDOTNbr	:= irp.irp_chameleon.fGetUSDOTNbr(pIrpNbr => pIrpNbr);
+	irp.irp_chameleon.pGetContactName(pIrpNbr 	=> pIrpNbr,
+									pFname		=> sFname,
+									pMname		=> sMname,
+									pLname		=> sLname);
+	irp.irp_chameleon.pGetAddressDetails(pIrpNbr	=> pIrpNbr,
+										pAddStreet	=> sAddStreet,
+										pAddLine2	=> sAddLine2,
+										pAddCity	=> sAddCity,
+										pAddState	=> sAddState,
+										pAddZip		=> sAddZip);
+	sEmail := irp.irp_chameleon.fGetEmail(pIRPNbr 	=> pIRPNbr);
+	sPhone := irp.irp_chameleon.fGetPhone(pIRPNbr	=> pIRPNbr);
+	END;
+
+	-- 20170228.1   initial version. the package is setup to test
+	--              for phone number, address and email. this package
+	--              depends on a few objects. execute on the package
+	--              irp.irp_api_lookups, and select on irp.irp_applicants
 
 	FUNCTION fInsChameleon(pIRPNbr 		IN NUMBER,
                             pusdotnbr 	IN VARCHAR2,
@@ -1140,6 +1280,56 @@ AS
     end if;
   END irp_company;
 
+  -- called by irp0008.
+  -- v1.0 addition, by passing the irp number, we will go through all off
+  -- the chameleon parameters and use the database as apposed to the 
+  -- form. this will free us up from issues like navagation when in
+  -- a validate trigger.
+  FUNCTION fCalcScore(pirpnbr IN INTEGER) RETURN NUMBER
+	nScore		NUMBER;		-- the score we are going to return to the calling 
+							-- program.
+	sCompany	irp.irp_applicants.irp_app_company%type;
+	sUSDOTNbr	irp.irp_applicants.irp_app_usdotno%type;
+	sFname		irp.irp_contacts.irp_con_fname%type;
+	sMname		irp.irp_contacts.irp_con_mname%type;
+	sLname		irp.irp_contacts.irp_con_lname%type;
+	sAddStreet	irp.irp_applicants.irp_app_addstreet%type;
+	sAddLine2	irp.irp_applicants.irp_app_addline2%type;
+	sAddCity	irp.irp_applicants.irp_app_addcity%type;
+	sAddState	irp.irp_applicants.irp_app_addstate%type;
+	sAddZip		irp.irp_applicants.irp_app_addzip%type;
+	sEmail		irp.irp_applicants.irp_app_conemail%type;
+	sPhone		irp.irp_applicants.irp_app_conphone%type;
+	
+	BEGIN
+		-- get the company details
+		pGetCompanyDetails(pIRPNbr 	=> pIrpNbr,
+						pCompany 	=> sCompany,
+						pUSDOTNbr	=> sUSDOTNbr,
+						pFname		=> sFname,
+						pMname		=> sMname,
+						pLname		=> sLname,
+						pAddStreet	=> sAddStreet,
+						pAddLine2	=> sAddLine2,
+						pAddCity	=> sAddCity,
+						pAddState	=> sAddState,
+						pAddZip		=> sAddZip,
+						pEmail		=> sEmail,
+						pPhone		=> sPhone);
+
+		-- calculate the score based on the company name.
+		nScore := irp.irp_chameleon.irp_comany(pIrpNbr => pIrpNbr,
+											   pCompany => sCompany);
+		--
+		IF nScore > 0 THEN
+			iChamilenId := irp.irp_chameleon.fInsChameleon(pIRPNbr 		=> pIRPNbr,
+														   pUSDOTNbr 	=> sUSDOTNbr,
+														   pScore		=> nScore,
+														   pAttr		=> 'COMPANY',
+														   pOverRide	=> 'N');
+		END IF;
+	END fCalcScore;
+  
 END irp_chameleon;
 
 /
@@ -1178,7 +1368,75 @@ END irp_chameleon;
     raise_application_error(-20002, 'error inserting note.');
     RETURN -1;
   END finsnote;
-
+  
 END;
 /
 
+CREATE OR REPLACE PACKAGE irp.irp_api_applicants AS
+	FUNCTION fSelApplicants(pIRPIrpnbr INTEGER) RETURN irp.tt_applicants;
+	PROCEDURE pUpdApplicnats(pAppTab IN irp.tt_applicants);
+END irp_api_applicants;
+/
+
+CREATE OR REPLACE PACKAGE BODY irp.irp_api_applicants AS
+	FUNCTION fSelApplicants(pIRPIrpnbr INTEGER) RETURN irp.tt_applicants IS
+		l_app_tab irp.tt_applicants;
+	BEGIN
+
+		SELECT irp.ot_applicants(
+					irp_app_irpnbr          ,
+					irp_app_company         ,
+					irp_app_fein            ,
+					irp_app_addstreet       ,
+					irp_app_addline2        ,
+					irp_app_addcity         ,
+					irp_app_addcounty       ,
+					irp_app_addstate        ,
+					irp_app_addzip          ,
+					irp_app_conlname        ,
+					irp_app_confax          ,
+					irp_app_prtsd           ,
+					irp_app_remarks         ,
+					irp_app_status          ,
+					irp_app_userid          ,
+					irp_app_activitydate    ,
+					irp_app_usdotno         ,
+					irp_app_ifta            ,
+					irp_app_conphone        ,
+					irp_app_conemail        ,
+					irp_app_regonly         ,
+					irp_app_prismchk        ,
+					irp_app_prismstatus     ,
+					irp_app_target          ,
+					irp_app_chameleon_score )
+		BULK COLLECT INTO l_app_tab
+		FROM irp.irp_applicants
+		WHERE irp_app_irpnbr = pIRPIrpnbr;
+		--
+		RETURN l_app_tab;
+		--
+	END fSelApplicants;
+	--
+	PROCEDURE pUpdApplicnats(pAppTab IN irp.tt_applicants) IS
+	BEGIN
+		FORALL i in 1 .. pAppTab.count
+			UPDATE irp.irp_applicants
+				SET irp_app_addstreet		= pAppTab(i).irp_app_addstreet,
+					irp_app_addline2		= pAppTab(i).irp_app_addline2,
+					irp_app_addcity			= pAppTab(i).irp_app_addcity,
+					irp_app_addcounty		= pAppTab(i).irp_app_addcounty,
+					irp_app_addstate		= pAppTab(i).irp_app_addstate,
+					irp_app_addzip			= pAppTab(i).irp_app_addzip,
+					irp_app_conlname		= pAppTab(i).irp_app_conlname,
+					irp_app_confax			= pAppTab(i).irp_app_confax,
+					irp_app_prtsd			= pAppTab(i).irp_app_prtsd,
+					irp_app_remarks			= pAppTab(i).irp_app_remarks,
+					irp_app_status			= pAppTab(i).irp_app_status,
+					irp_app_conphone		= pAppTab(i).irp_app_conphone,
+					irp_app_conemail		= pAppTab(i).irp_app_conemail,
+					irp_app_target			= pAppTab(i).irp_app_target,
+					irp_app_chameleon_score	= pAppTab(i).irp_app_chameleon_score
+			WHERE irp_app_irpnbr = pAppTab(i).irp_app_irpnbr;
+	END pUpdApplicnats;
+END irp_api_applicants;
+/
