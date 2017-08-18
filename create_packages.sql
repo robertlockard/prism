@@ -1440,3 +1440,595 @@ CREATE OR REPLACE PACKAGE BODY irp.irp_api_applicants AS
 	END pUpdApplicnats;
 END irp_api_applicants;
 /
+
+--------------------------------------------------------
+--  DDL for Package IRP_CHAMELEON
+--------------------------------------------------------
+
+  CREATE OR REPLACE EDITIONABLE PACKAGE "IRP"."IRP_CHAMELEON" 
+AS
+FUNCTION fInsChameleon(pIRPNbr 		IN NUMBER,
+                        pusdotnbr 	IN VARCHAR2,
+                        pvin        IN VARCHAR2 DEFAULT NULL,
+                        pscore      IN NUMBER,
+                        pAttr       IN VARCHAR2,
+                        poverride   IN VARCHAR2 DEFAULT NULL) RETURN INTEGER;
+FUNCTION fUpdChameleon(pChameleonId IN NUMBER,
+                       pOverRide    IN VARCHAR2) RETURN NUMBER;
+--
+PROCEDURE pParseName( pName     IN 		VARCHAR2,
+                        pFname    OUT 	VARCHAR2,
+                        pMname    OUT 	VARCHAR2,
+                        plname    OUT 	VARCHAR2,
+                        psuffix   OUT   VARCHAR2);
+--
+FUNCTION irp_phone(pphone       IN     VARCHAR2,
+                    pnewirpnbr  IN     NUMBER) RETURN NUMBER;
+--
+FUNCTION irp_new_usdotnbr(pusdotnbr IN VARCHAR2) RETURN NUMBER;
+--
+FUNCTION irp_address(pStreet 	IN VARCHAR2,
+                    pstreet2 	IN VARCHAR2,
+                    pcity		IN VARCHAR2,
+                    pcounty	    IN VARCHAR2,
+                    pstate		IN VARCHAR2,
+                    pzip        IN VARCHAR2,
+                    pirpnbr     IN INTEGER) RETURN NUMBER;
+--
+FUNCTION irp_email(pEmail   IN VARCHAR2,
+                    pirpnbr IN INTEGER) RETURN NUMBER;
+--
+FUNCTION irp_name(pname   IN VARCHAR2) RETURN NUMBER;
+--
+FUNCTION irp_name(  pFullName IN VARCHAR2,
+                    pfname    IN VARCHAR2,
+                    pmname    IN VARCHAR2 DEFAULT NULL,
+                    plname    IN VARCHAR2,
+                    pirpnbr   IN INTEGER) RETURN NUMBER;
+--
+FUNCTION irp_vehicle(pvin     IN VARCHAR2,
+                     pirpnbr  IN INTEGER) RETURN NUMBER;
+--
+FUNCTION irp_company(pirpnbr    IN INTEGER,
+                     pCompany   IN VARCHAR2) RETURN NUMBER;
+--
+FUNCTION irp_override_chameleon(pChemId INTEGER,
+                                pnote   CLOB) RETURN INTEGER;
+--
+FUNCTION fcheckvehicle(pvin        IN VARCHAR2,
+                        pirpnbr    IN INTEGER) RETURN NUMBER;
+--
+FUNCTION fchameleonscorethreshold RETURN INTEGER;
+
+END irp_chameleon;
+
+/
+
+--------------------------------------------------------
+--  DDL for Package Body IRP_CHAMELEON
+--------------------------------------------------------
+
+  CREATE OR REPLACE EDITIONABLE PACKAGE BODY "IRP"."IRP_CHAMELEON" 
+AS
+  -- 20170228.1   initial version. the package is setup to test
+  --              for phone number, address and email. this package
+  --              depends on a few objects. execute on the package
+  --              irp.irp_api_lookups, and select on irp.irp_applicants
+
+	FUNCTION fInsChameleon(pIRPNbr 		IN NUMBER,
+                            pusdotnbr 	IN VARCHAR2,
+                            pVIN        IN VARCHAR2 DEFAULT NULL,
+                            pscore      IN NUMBER,
+                            pattr       IN VARCHAR2,
+                            pOverRide   IN VARCHAR2 DEFAULT NULL) RETURN INTEGER IS
+	PRAGMA AUTONOMOUS_TRANSACTION;
+
+  iLog    INTEGER;   -- log id
+  iChemId NUMBER;
+  sError  VARCHAR2(255);
+	BEGIN
+    -- possible to get null with pOverRide, so use the NVL function.  
+    IF nvl(pOverRide,'Y') != 'Y' AND pOverRide != 'N' THEN
+      RAISE_APPLICATION_ERROR(-20003, 'Override must be Y or N');
+    END IF;
+
+    SELECT irp.irp_chameleon_seq.NEXTVAL
+    INTO iChemId
+    FROM dual;
+
+		INSERT INTO irp.irp_chameleons VALUES (
+                            iChemId,
+                            pIRPNbr,
+                            pUSDOTNBR,
+                            pVIN,
+                            pScore,
+                            pattr,
+                            NULL,           -- TITLE NUMBER. <FIXME> LOOK IT UP.
+                            pOverRide);     -- OVERRIDE DEFUALTS TO 'N'
+		COMMIT;
+		RETURN iChemId;
+	EXCEPTION WHEN OTHERS THEN
+        sError := sqlerrm;
+        UTILITY.ERRORSTACK_PKG.pMain(pErrorId => iLog);
+        RAISE_APPLICATION_ERROR(-20000,'An error was raised, check the error ' 
+                    || 'log #: ' || ilog);
+        RETURN iLog*-1;
+	END finschameleon;
+
+    FUNCTION fupdchameleon(pchameleonid IN NUMBER,
+                           poverride    IN VARCHAR2) RETURN NUMBER IS
+    PRAGMA autonomous_transaction;
+    ilog INTEGER;
+    sError VARCHAR2(4000);
+    BEGIN
+        UPDATE irp.irp_chameleons
+        SET irp_cha_override = poverride;
+        COMMIT;
+        RETURN pChameleonId;
+    EXCEPTION WHEN OTHERS THEN
+        sError := sqlerrm;
+        UTILITY.ERRORSTACK_PKG.pMain(pErrorId => iLog);
+        RAISE_APPLICATION_ERROR(-20000,'An error was raised, check the error ' 
+                    || 'log #: ' || ilog);
+        RETURN iLog*-1;
+    END fUpdChameleon;
+
+  --              we should also focuse on the name of the person who is
+  --              the priniple.
+
+ 	PROCEDURE pParseName( pName IN VARCHAR2,
+                        pFname    OUT VARCHAR2,
+                        pMname    OUT VARCHAR2,
+                        pLname    OUT VARCHAR2,
+                        pSuffix   OUT VARCHAR2) IS
+
+		iWhiteSpaceCount	INTEGER;	-- we are going to count the number of white spaces to determan if
+                                        -- there is a middle name enbedded.
+    iLog INTEGER;   -- log id
+    sTemp VARCHAR2(65);
+
+	BEGIN
+		-- count the number of white spaces to determan if first, middle, last exists.
+    sTemp := trim(pName);
+    --<FIXME> we need to use the regualar expression, instr returns the position
+    -- of the charactor, for this implanataion, we need the count of the 
+    -- white spaces. Oracle 10G does not support this.
+		iWhiteSpaceCount := regexp_count(sTemp, ' ');
+		--
+		IF iWhiteSpaceCount = 0 THEN	-- we are only dealing with last name
+			pLname := trim(sTemp);
+		ELSIF iWhiteSpaceCount = 1 THEN	-- we are dealing with first name, last name
+			pFname := trim(substr(sTemp,1,instr(sTemp, ' ')));
+			pLname := trim(substr(sTemp, instr(sTemp, ' ', 1)));
+		ELSIF iWhiteSpaceCount = 2 THEN	  -- we are dealing with first, middle, last name
+                                      -- and possibilly SR/JR, etc.
+      sys.dbms_output.put_line('pName: ' || sTemp);
+			pFname := trim(substr(sTemp,1,instr(sTemp, ' ')));
+      sTemp := trim(substr(sTemp, regexp_instr(sTemp, ' ', 1, 1)));  --
+      sys.dbms_output.put_line('sTemp: ' || sTemp);
+			pMname := trim(substr(trim(sTemp), 1, regexp_instr(trim(sTemp), ' ')));
+      sTemp := trim(substr(sTemp, regexp_instr(sTemp, ' ', 1, 1)));  --
+			pLname := trim(substr(sTemp, regexp_instr(sTemp, ' ',1 , 2)));
+    ELSIF iWhiteSpaceCount = 3 THEN -- this is a complex name.
+      -- we are expecting a suffix, therefore lets strip out any
+      -- potential ',' from the string.
+      sTemp := replace(sTemp,',');  -- remove ',' from the string.
+      pFname := trim(substr(sTemp,1,instr(sTemp, ' ')));
+      sTemp := trim(substr(sTemp, regexp_instr(sTemp, ' ', 1, 1)));  --
+			pMname := trim(substr(trim(sTemp), 1, regexp_instr(trim(sTemp), ' ')));
+      sTemp := trim(substr(sTemp, regexp_instr(sTemp, ' ', 1, 1)));  --
+			pLname := trim(substr(sTemp,1, regexp_instr(sTemp, ' ',1)));
+      sTemp := trim(substr(sTemp, regexp_instr(sTemp, ' ', 1, 1)));  --
+      pSuffix := trim(substr(sTemp, regexp_instr(sTemp, ' ',1 , 2)));
+		END IF;
+  EXCEPTION WHEN OTHERS THEN
+    UTILITY.ERRORSTACK_PKG.pMain(pErrorId => iLog);
+    RAISE_APPLICATION_ERROR(-20000,'An error was raised, check the error ' 
+                || 'log #: ' || iLog);
+	END pParseName;
+
+	-- the test phone number function will look at the phone number
+	-- the applicant gave us. if there phone number matches then
+	-- we will return 1, else we will return 0.
+		FUNCTION irp_phone(pPhone     IN     VARCHAR2,
+                       pNewIRPNbr IN     NUMBER) RETURN NUMBER IS
+      iTest NUMBER; 	-- the counter to test to see if the phone already exists.
+                      -- we are reusing iTest to get the return value from irp_lookups.
+      iLog INTEGER;   -- log id
+
+	BEGIN
+
+    -- test to see if the phone number exists and if the carrier is
+    -- targeted. Note we are using regexp_replace to strip out anything
+    -- that is not in 0-9. Also not, this is going to force a full tablescan.
+    -- so, lets monitor the performace and if there is an issue with performance
+    -- we can consider creating a bitmap index on irp_app_target.  Of course that
+    -- would impact the performace of setting targeted carriers.
+    BEGIN
+      SELECT count(*)
+      INTO iTest
+      FROM irp.irp_contacts c
+      WHERE regexp_replace(substr(irp_con_phone,1,10), '[^0-9]', '') = regexp_replace(substr(pphone,1,10), '[^0-9]', '')
+        and c.irp_con_irpnbr != pNewIrpNbr;
+        RETURN 1;
+      EXCEPTION WHEN NO_DATA_FOUND THEN
+        RETURN 0;
+      WHEN OTHERS THEN
+        UTILITY.ERRORSTACK_PKG.pMain(pErrorId => iLog);
+        RAISE_APPLICATION_ERROR(-20000,'An error was raised, check the error ' || 
+                    ' log #: ' || iLog);
+        RETURN 0;
+    END;
+
+  EXCEPTION WHEN OTHERS THEN
+    utility.errorstack_pkg.pmain(perrorid => ilog);
+    RAISE_APPLICATION_ERROR(-20000,'An error was raised, check the error ' || 'log #: ' || iLog);
+	END irp_phone;
+
+	-- test to see if the address the applicant gave us already exists.
+	-- if the address exists and is targeted then return 1, else return 0
+	FUNCTION irp_address(pstreet 	IN VARCHAR2,
+						 pstreet2	  IN VARCHAR2,
+						 pCity		  IN VARCHAR2,
+						 pcounty	  IN VARCHAR2,
+						 pstate		  IN VARCHAR2,
+						 pzip		    IN VARCHAR2,
+             pIrpNbr    IN INTEGER) RETURN NUMBER IS
+	iTest NUMBER; 	-- the counter to test to see if the address already exists.
+                  -- we are reusing iTest to get the return value from irp_lookups.
+  iLog  INTEGER;  -- error log id
+	BEGIN
+
+	-- we should remove all the spaces from the address to make sure we
+	-- catch multiple spaces or no spaces. we are also going to use the
+	-- upper function to switch all letters to upper case. street2 is
+	-- not always used, so we are going to put in nvl 'X' to force the
+	-- true condition. note we using regexp_replace on both sides of the
+    -- predicate to strip out any special charactors that may be in the data.
+		SELECT count(*)
+		INTO iTest
+		FROM irp.irp_applicants
+		WHERE soundex(regexp_replace(UPPER(irp_app_addstreet), '[^A-Z0-9]',''))          = soundex(regexp_replace(UPPER(pstreet), '[^A-Z0-9]',''))
+		  AND regexp_replace(upper(substr(irp_app_addzip,1,5)), '[^A-Z0-9]','')             = regexp_replace(upper(substr(pzip,1,5)), '[^A-Z0-9]','')
+      and irp_app_irpnbr != pIRPNbr;
+		-- test to see if we have a hit. if there is s hit, then return 1, else return 0
+		IF iTest > 0 THEN
+			-- get the value (weight) for ccaddress.
+			BEGIN
+				-- change to a function to get to lookup value. once we have tested
+        -- to see that the address exists, we need to get the weight of the 
+        -- test from irp.irp_lookups sing the fValue function.
+				iTest := IRP.IRP_API_LOOKUPS.fValue('CCADDRESS');
+        --
+        --
+        RETURN iTest;
+			END;
+		ELSE
+      --
+			RETURN 0;
+		END IF;
+  EXCEPTION WHEN OTHERS THEN
+    UTILITY.ERRORSTACK_PKG.pMain(pErrorId => iLog);
+    RAISE_APPLICATION_ERROR(-20000,'An error was raised, check the error ' 
+                || 'log #: ' || iLog);
+	END irp_address;
+
+	-- okay, if the carrier is using the same email address they are just plain stupid.
+	FUNCTION irp_email(pEmail IN VARCHAR2,
+                     pIrpNbr IN INTEGER) RETURN NUMBER IS
+	iTest NUMBER; -- the counter to test to see if the email already exists.
+                -- we are reusing iTest to get the return value from irp_lookups.
+    iLog  INTEGER; -- error log id.
+	BEGIN
+  --
+		SELECT count(*)
+		INTO iTest
+		FROM irp.irp_applicants
+		WHERE regexp_replace(upper(irp_app_conemail), '[^A-Z0-9]','') = regexp_replace(upper(pemail), '[^A-Z0-9]','')
+    AND irp_app_irpnbr != pIrpNbr;
+		-- test to see if we have a hit. if we have a hit then
+		-- return 1, else return 0.
+		IF iTest > 0 THEN
+			-- get the value (weight) for email.
+			BEGIN
+				-- change to a function to get to lookup value. this query is
+				iTest := IRP.IRP_API_LOOKUPS.fValue('CCEMAIL');
+        --
+        RETURN iTest;
+			END;
+		ELSE
+      --
+      --
+			RETURN 0;
+		END IF;
+  EXCEPTION WHEN OTHERS THEN
+    UTILITY.ERRORSTACK_PKG.pMain(pErrorId => iLog);
+    RAISE_APPLICATION_ERROR(-20000,'An error was raised, check the error ' 
+                || 'log #: ' || iLog);
+	END irp_email;
+
+	-- this is to test to see if the person regestering the carrier has already
+	FUNCTION irp_name(pName IN VARCHAR2) RETURN NUMBER IS
+	iTest NUMBER;	-- the counter to test to see if the name already exists.
+                -- we are reusing iTest to get the return value from irp_lookups.
+  iLog  INTEGER;
+	BEGIN
+    --
+		SELECT count(*)
+		INTO iTest
+		FROM irp.irp_applicants
+		WHERE regexp_replace(upper(IRP_APP_CONLNAME), '[^A-Z0-9]','') = regexp_replace(upper(pname), '[^A-Z0-9]','');
+		-- test to see if we have a hit. if we have a hit then
+		-- return 1, else return 0.
+		IF iTest > 0 THEN
+			-- the the value (weight) for contact name
+			iTest := irp_api_lookups.fValue('CCNAME');
+      --
+			RETURN iTest;
+		ELSE
+      --
+			RETURN 0;
+      --
+		END IF;
+    --
+  EXCEPTION WHEN OTHERS THEN
+    UTILITY.ERRORSTACK_PKG.pMain(pErrorId => iLog);
+    RAISE_APPLICATION_ERROR(-20000,'An error was raised, check the error ' 
+                || 'log #: ' || iLog);
+	END irp_name;
+
+  FUNCTION irp_name(pFullName IN VARCHAR2,
+                    pfname IN VARCHAR2,
+                    pmname IN VARCHAR2 DEFAULT NULL,
+                    plname IN VARCHAR2,
+                    pIRPNbr IN INTEGER) RETURN NUMBER IS
+  icnt          INTEGER;  -- the number of rows returns on a name.
+  nprobability  NUMBER;   -- the probability of common names.
+  nscore        NUMBER;   -- the score we are going to return.
+  nTmp          NUMBER;   -- just a temporary variable.
+  BEGIN
+
+    -- validate the input. check to see the string does not
+    -- contain any sql key words. if they do, then raise
+    -- and error.
+    -- <fixme> the validate function always returns true.
+    /*
+    IF utility.generic_pkg.fReserved(pFname) OR
+       utility.generic_pkg.fReserved(pMname) OR
+       utility.generic_pkg.fReserved(pLname) THEN
+          raise_application_error(-20004,NULL);
+    END IF;
+    */
+    -- get score baseline.
+    BEGIN
+      SELECT irp_lok_value 
+      INTO nscore
+      FROM irp.irp_lookups
+      WHERE irp_lok_type = 'CCNAME';
+    exception WHEN no_data_found THEN
+          raise_application_error(-20005,NULL);
+    END;
+    -- is the first name a variation of a common name?
+    BEGIN
+      SELECT probability
+      INTO nprobability
+      FROM irp.irp_common_names
+      WHERE name_variation = pfname;
+      -- we had a match. 
+
+    exception WHEN no_data_found THEN
+      -- this is an expected condition
+      nProbability := 1;
+    WHEN too_many_rows THEN
+      nprobability := 1;
+    END;
+
+    -- is the last name a common name?
+    BEGIN
+      SELECT probability 
+      INTO nTmp
+      FROM irp.irp_common_names
+      WHERE NAME = plname;
+      nprobability := nvl(nprobability,1) * ntmp;
+
+    exception WHEN no_data_found THEN
+      -- this is an expected condition.
+      IF nvl(nprobability,1) = 1 THEN
+        nprobability := 1;
+      END IF;
+      WHEN too_many_rows THEN
+        nprobability := 1;
+      WHEN others THEN
+        -- <FIXME> insert error handler.
+        raise_application_error(-20006, NULL);
+    END;
+    -- do we have a match on names?
+    SELECT count(*)
+    INTO iCnt
+    FROM irp.irp_contacts
+    WHERE soundex(irp_con_fname) = soundex(pfname)
+      --AND nvl(irp_con_mname,'X') = nvl(pmname,'X')
+      AND soundex(irp_con_lname) = soundex(plname)
+      AND irp_con_irpnbr != pIRPNbr;
+    IF iCnt > 0 THEN
+      nscore := nscore * nprobability;
+      RETURN nscore;
+    ELSE
+      BEGIN
+        -- did not match on contacts, lets try and match 
+        -- on applicants.
+        SELECT COUNT(*)
+        INTO icnt
+        FROM irp.irp_applicants
+        WHERE soundex(irp_app_conlname) = soundex(pfullname);
+        
+        IF icnt > 0 THEN
+          nscore := nscore * nprobability;
+        END IF;
+      END;
+      --  
+      RETURN 0;
+    END IF;
+  END irp_name;
+
+  -- test to see if the vehicle has been targeted. if it has then return the value
+  -- from irp_lookups.
+  FUNCTION irp_vehicle(pvin     IN VARCHAR2,
+                       pIRPNbr  IN INTEGER) RETURN NUMBER IS
+  iVINCnt INTEGER;
+  iTest   NUMBER;     -- NOTE: because the score is in fractions, we need to use numbers.
+  iLog    INTEGER;
+  BEGIN
+    --
+    -- is the vehicle targeted. Use the package irp_chamilian
+    SELECT COUNT(*)
+    INTO iVINCnt
+    FROM irp.irp_prsmlcltgtveh
+    WHERE irp_ptv_vin = pvin;
+
+    IF iVINCnt > 0 THEN
+      -- get the score from irp.ipr_lookups.
+      iTest := irp_api_lookups.fValue('VIN');
+      --
+      RETURN iTest;
+    END IF;
+    --
+    -- if there is no hit, return 0
+    RETURN 0;
+  EXCEPTION WHEN OTHERS THEN
+    UTILITY.ERRORSTACK_PKG.pMain(pErrorId => iLog);
+    RAISE_APPLICATION_ERROR(-20000,'An error was raised, check the error ' 
+                || 'log #: ' || iLog);
+  END irp_vehicle;
+  --
+
+  FUNCTION irp_new_usdotnbr(pUSDOTNBR IN VARCHAR2) RETURN NUMBER IS
+   dCreateDate  DATE;
+   iDaysBetween INTEGER;
+   iLog         INTEGER;
+  BEGIN
+    --
+    --
+    -- this function will be using irp.irp_prsmlclcensus table to get
+    -- the date a usdot number was created.
+    --
+    BEGIN
+      SELECT IRP_PLC_DATEADDED
+      INTO dCreateDate
+      FROM irp.irp_prsmlclcensus
+      WHERE irp_plc_usdotno = pUSDOTNBR;
+    EXCEPTION WHEN NO_DATA_FOUND THEN
+      --
+      UTILITY.ERRORSTACK_PKG.pMain(pErrorId => iLog);
+      RAISE_APPLICATION_ERROR(-20000,'An error was raised, check the error ' 
+                  || 'log #: ' || iLog);
+      RETURN -1;
+    END;
+    --
+    -- We can do this a bit better. right now we are hard coding
+    -- the newness of a carrier. lets think about what we can
+    -- do to make this a bit more flexable.
+    iDaysBetween := SYSDATE - dCreateDate;
+    IF iDaysBetween < 30 THEN
+      --
+      RETURN 1;
+    ELSE
+      --
+      RETURN 0;
+    END IF;
+  EXCEPTION WHEN OTHERS THEN
+    UTILITY.ERRORSTACK_PKG.pMain(pErrorId => iLog);
+    RAISE_APPLICATION_ERROR(-20000,'An error was raised, check the error ' 
+                || 'log #: ' || iLog);
+  END irp_new_usdotnbr;
+
+  FUNCTION irp_override_chameleon(pChemId INTEGER,
+                                  pNote   CLOB) RETURN INTEGER IS
+	PRAGMA AUTONOMOUS_TRANSACTION;
+  ilog  INTEGER; -- ERROR LOG
+  iNoteId   INTEGER;
+  BEGIN
+    UPDATE irp.irp_chameleons SET IRP_CHA_OVERRIDE = 'Y'
+    WHERE irp_cha_id = pChemId;
+
+    iNoteId := irp.irp_api_notes.fInsNote(pChemId => pChemId,
+                                        pnote   => pnote);
+    COMMIT;
+    RETURN iNoteId;
+  EXCEPTION WHEN OTHERS THEN
+    UTILITY.ERRORSTACK_PKG.pMain(pErrorId => iLog);
+    RAISE_APPLICATION_ERROR(-20000,'An error was raised, check the error ' 
+                || 'log #: ' || iLog);
+    RETURN -1;
+  END irp_override_chameleon;
+
+-- will return the number of vehicles that match the VIN.
+  FUNCTION fcheckvehicle(pvin       IN VARCHAR2,
+                         pirpnbr    IN INTEGER) RETURN NUMBER IS
+    iCnt    INTEGER;
+    iLog    INTEGER;
+  BEGIN
+    SELECT COUNT(*)
+    INTO iCnt
+    FROM IRP_VEHICLES,
+      IRP_DECALS,
+      IRP_BILLPAYMENTS,
+      IRP_BILLS,
+      IRP_FLEETS,
+      IRP_FLEETVEHICLES,
+      IRP_PLATES,
+      IRP_APPLICANTS
+    WHERE  IRP_PLA_SEQ = IRP_DEC_PLATESEQ
+     AND IRP_BIL_REGID = IRP_DEC_REGID
+     AND IRP_BLP_BILLID = IRP_BIL_ID
+     AND IRP_VEH_ID = IRP_DEC_VEHICLEID
+     AND IRP_FLE_ID = IRP_DEC_FLEETID
+     AND IRP_FLV_FLEETID = IRP_DEC_FLEETID
+     AND IRP_FLV_VEHICLEID = IRP_DEC_VEHICLEID
+     AND IRP_FLV_REGYEAR = IRP_DEC_REGYEAR
+     AND IRP_APP_IRPNBR = IRP_FLE_IRPNBR
+     AND irp_veh_vin = pvin
+     and irp_app_irpnbr != pIRPNbr
+    ORDER BY irp_fle_irpnbr,
+                            irp_fle_nbr,
+                            IRP_FLV_REGYEAR,
+                            irp_flv_ownereqpnbr;
+    RETURN iCnt;
+  EXCEPTION WHEN OTHERS THEN
+    UTILITY.ERRORSTACK_PKG.pMain(pErrorId => iLog);
+    RAISE_APPLICATION_ERROR(-20000,'An error was raised, check the error ' 
+                || 'log #: ' || iLog);
+  END fCheckVehicle;
+
+  FUNCTION fchameleonscorethreshold RETURN INTEGER IS
+  iScoreThreshold INTEGER;
+  BEGIN
+    SELECT irp_lok_value
+    INTO iScoreThreshold
+    FROM irp.irp_lookups
+    WHERE irp_lok_type = 'THRESHOLD';
+    RETURN iScoreThreshold;
+  EXCEPTION WHEN too_many_rows THEN
+    RAISE_APPLICATION_ERROR(-20001,NULL);
+    WHEN NO_DATA_FOUND THEN
+    RAISE_APPLICATION_ERROR(-20002,NULL);
+  END fchameleonscorethreshold;
+
+  FUNCTION irp_company(pirpnbr    IN INTEGER,
+                        pcompany   IN VARCHAR2) RETURN NUMBER AS
+  iTest     INTEGER;
+  BEGIN
+    SELECT count(*)
+    INTO iTest
+    FROM irp.irp_applicants
+    WHERE soundex(irp_app_company) = soundex(pcompany);
+    IF itest > 0 THEN
+        RETURN 1;
+    ELSE
+        RETURN 0;
+    end if;
+  END irp_company;
+
+END irp_chameleon;
+
+/
